@@ -16,26 +16,30 @@
 #include <unistd.h>
  
 typedef struct 
-	{ 
-	unsigned char sma_header[12];
-    unsigned char datlen[2];
-    unsigned char skip[4];
-    unsigned char susy[2];
-    unsigned char serno[4];
-    unsigned char ticker[4];
-    unsigned char channels[1500];
-	} EMETER_DATA;
+{ 
+   unsigned char idString[4];
+   unsigned char _4[2];
+   unsigned char tag[2];
+   unsigned char group[4];
+   unsigned char length[2];
+   unsigned char smaNet2[2];
+   unsigned char protID[2];
+   unsigned char susy[2];
+   unsigned char serno[4];
+   unsigned char ticker[4];
+   unsigned char channels[1500];
+} EMETER_DATA2;
+
+static EMETER_DATA2 emeter_data2;
 
 typedef struct
-	{ 
+{ 
     unsigned char channel;
 	unsigned char idx;
 	unsigned char typ;
 	unsigned char tariff;
 	unsigned char value[8];
-	} OBIS_TAG;
-
-static EMETER_DATA emeter_data;
+} OBIS_TAG;
 
 #define GETW(_a)  ((((unsigned int)(_a)[0]) << 8)+ ((_a)[1]))
 #define GETDW(_a) ((GETW((unsigned char *)(_a)) << 16) + (GETW((unsigned char *)(_a)+2)))
@@ -46,10 +50,10 @@ static EMETER_DATA emeter_data;
 #define MC_ADDR "239.12.255.254"
 #define PORT    9522
 
-#define EMETER_LEN 588
+#define EMETER_LENGTH 588
 
 // Empty tag for notfound entries
-static OBIS_TAG notfound={0xFF, 0xFF, 0xFF, 0xFF, {0, 0, 0, 0, 0, 0, 0, 0}};
+static OBIS_TAG notfound = {0xFF, 0xFF, 0xFF, 0xFF, {0, 0, 0, 0, 0, 0, 0, 0}};
 
 static unsigned char *find_tag(unsigned char *emdat, int len, unsigned char typ, unsigned char idx)
 {
@@ -109,12 +113,12 @@ static unsigned char *find_tag(unsigned char *emdat, int len, unsigned char typ,
 // 71     Strom L3(A)
 // 72     Spannung L3(V)
 
-static double handle_emeter(EMETER_DATA *emeter_data, int typ, int idx, int expected_len)
+static double handle_emeter(EMETER_DATA2 *emeter_data, int typ, int idx, int expected_len)
 {
 	unsigned long rawvalue;
 	double value = -1.0;
 
-	int datlen = GETW(emeter_data->datlen);
+	int datlen = GETW(emeter_data->length); //datlen);
 	if (datlen != expected_len) {
 		printf("No valid message from energie meter, expected length %d, got %d\n", expected_len, datlen);
 		return value;
@@ -206,17 +210,46 @@ static double handle_emeter(EMETER_DATA *emeter_data, int typ, int idx, int expe
 	return value;
 }
 
+// TODO Use syslog for error output
+// TODO Enable output of time stamp via cmd parameter
+// TODO Enable JSON output of measurements via cmd parameter
+// TODO Set expected emeter data length via cmd parameter
+
 int main (int argc, char *argv[])
 {
-	int sd;
-	int datalen = sizeof(emeter_data);
+	int opt;
+	int length = EMETER_LENGTH;
+	bool ts = false;
+	bool js = false;
+
+	while((opt = getopt(argc, argv, "tjl:")) != -1)
+	{
+		switch(opt)
+		{
+			case 't':
+				ts = true;
+				break;
+				
+			case 'j':
+				js = true;
+				break;
+				
+			case 'l':
+				length = atoi(optarg);
+				break;
+				
+			default:
+				printf("Usage sample: -t -j -l 588\n");
+				exit(1);
+		}
+	}
 
 	printf("Compiled with C version: %lu\n\n", __STDC_VERSION__);
 
 	/*
 	 * Create a datagram socket on which to receive.
 	 */
-	sd = socket(AF_INET, SOCK_DGRAM, 0);
+	int sd = socket(AF_INET, SOCK_DGRAM, 0);
 	if (sd < 0) {
 		perror("Opening datagram socket");
 		exit(1);
@@ -273,35 +306,48 @@ int main (int argc, char *argv[])
 	/*
 	 * First read from the socket.
 	 */
-	 printf("First read, expecting max %d bytes\n", datalen);
-	 if (recvfrom(sd, &emeter_data, datalen, 0, 0, 0) <= 0) {
+	 printf("First read, expecting max %ld bytes\n", sizeof(emeter_data2));
+	 if (recvfrom(sd, &emeter_data2, sizeof(emeter_data2), 0, 0, 0) <= 0) {
 		perror("Reading first datagram message");
 		exit(1);
 	}
 
-	printf("Time stamp: %u\n", GETDW(emeter_data.ticker) / 1000U);
-	printf("SN: %05u%010u\n\n", GETW(emeter_data.susy), GETDW(emeter_data.serno));
+	printf("ID:          %c%c%c\n", emeter_data2.idString[0], emeter_data2.idString[1], emeter_data2.idString[2]);
+	printf("4:           %04X\n", (uint32_t)GETW(emeter_data2._4));
+	printf("Tag:         %04X\n", (uint32_t)GETW(emeter_data2.tag));
+	printf("Group:       %08X\n", GETDW(emeter_data2.group));
+	printf("Length:      %u\n", GETW(emeter_data2.length));
+	printf("SMA net 2:   %04X\n", GETW(emeter_data2.smaNet2));
+	printf("Protocol ID: %04X\n", GETW(emeter_data2.protID));
+	printf("SN:          %05u%010u\n", GETW(emeter_data2.susy), GETDW(emeter_data2.serno));
+	printf("Time stamp:  %u\n\n", GETDW(emeter_data2.ticker) / 1000U);
 
 	while (true)
 	{
-        time_t now;
-        ssize_t ret;
-        
-		ret = recvfrom(sd, &emeter_data, datalen, 0, 0, 0);
+		ssize_t ret = recvfrom(sd, &emeter_data2, sizeof(emeter_data2), 0, 0, 0);
+
         if (ret < 0) {
             perror("Reading datagram message");
             exit(1);
         }
         else if (ret == 0) {
-        	printf("No message there, continue ...\n");
+        	printf("No message there, continue ...\n\n");
         	continue;
         }
 
-        printf("From grid [W]: %8.0f\n", handle_emeter(&emeter_data, CHNTYP_MEAS, 1, EMETER_LEN));
-        printf("To grid [W]:   %8.0f\n", handle_emeter(&emeter_data, CHNTYP_MEAS, 2, EMETER_LEN));
+		printf("Got %ld bytes from socket\n", ret);
+        
+		printf("From grid [W]: %8.0f\n", handle_emeter(&emeter_data2, CHNTYP_MEAS, 1, length));
+        printf("To grid [W]:   %8.0f\n", handle_emeter(&emeter_data2, CHNTYP_MEAS, 2, length));
 
-        now = time(0);
-	    printf("--%s\n", ctime(&now));
+		if (js) {
+			printf("{\"fromGrid_W\":%.0f, \"toGrid_W\":%.0f}\n", handle_emeter(&emeter_data2, CHNTYP_MEAS, 1, length), handle_emeter(&emeter_data2, CHNTYP_MEAS, 2, length));
+		}
+
+		if (ts) {
+			time_t now = time(0);
+	    	printf("--%s\n", ctime(&now));
+		}
     }
 
 	exit(1);
