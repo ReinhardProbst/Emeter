@@ -1,2 +1,2 @@
 # Emeter
-Energie meter
+SMA energie meter Speedwire
