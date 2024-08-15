@@ -14,6 +14,7 @@
 #include <time.h>
 #include <errno.h>
 #include <unistd.h>
+#include <syslog.h>
  
 typedef struct 
 { 
@@ -120,7 +121,8 @@ static double handle_emeter(EMETER_DATA2 *emeter_data, int typ, int idx, int exp
 
 	int datlen = GETW(emeter_data->length); //datlen);
 	if (datlen != expected_len) {
-		printf("No valid message from energie meter, expected length %d, got %d\n", expected_len, datlen);
+		//printf("No valid message from energie meter, expected length %d, got %d\n", expected_len, datlen);
+		syslog(LOG_ERR, "No valid message from energie meter, expected length %d, got %d\n", expected_len, datlen);
 		return value;
 	}
 	
@@ -210,26 +212,21 @@ static double handle_emeter(EMETER_DATA2 *emeter_data, int typ, int idx, int exp
 	return value;
 }
 
-// TODO Use syslog for error output
-// TODO Enable output of time stamp via cmd parameter
-// TODO Enable JSON output of measurements via cmd parameter
-// TODO Set expected emeter data length via cmd parameter
-
 int main (int argc, char *argv[])
 {
 	int opt;
 	int length = EMETER_LENGTH;
-	bool ts = false;
 	bool js = false;
 
-	while((opt = getopt(argc, argv, "tjl:")) != -1)
+	openlog("emeter", /*LOG_PERROR |*/ LOG_NDELAY, LOG_USER);
+	setlogmask(LOG_UPTO(LOG_INFO));
+	
+	syslog(LOG_INFO, "Compiled with C version: %ld", __STDC_VERSION__);
+
+	while((opt = getopt(argc, argv, "vjl:")) != -1)
 	{
 		switch(opt)
 		{
-			case 't':
-				ts = true;
-				break;
-				
 			case 'j':
 				js = true;
 				break;
@@ -239,19 +236,22 @@ int main (int argc, char *argv[])
 				break;
 				
 			default:
-				printf("Usage sample: -t -j -l 588\n");
+				printf("Usage sample: -j -l 588\n");
 				exit(1);
 		}
 	}
 
-	printf("Compiled with C version: %lu\n\n", __STDC_VERSION__);
+	if (!js)
+		printf("Compiled with C version: %lu\n\n", __STDC_VERSION__);
 
 	/*
-	 * Create a datagram socket on which to receive.
+	 * Create a datagram socket to receive.
 	 */
 	int sd = socket(AF_INET, SOCK_DGRAM, 0);
 	if (sd < 0) {
-		perror("Opening datagram socket");
+		//perror("Opening datagram socket");
+		syslog(LOG_ERR, "Opening datagram socket failed: %s", strerror(errno));
+		closelog();
 		exit(1);
 	}
     
@@ -262,8 +262,10 @@ int main (int argc, char *argv[])
 	int reuse = 1;
 
 	if (setsockopt(sd, SOL_SOCKET, SO_REUSEADDR, (char*)&reuse, sizeof(reuse)) < 0) {
-		perror("Setting SO_REUSEADDR");
+		//perror("Setting SO_REUSEADDR");
+		syslog(LOG_ERR, "Setting SO_REUSEADDR failed: %s", strerror(errno));
 		close(sd);
+		closelog();
 		exit(1);
 	}
 
@@ -279,8 +281,10 @@ int main (int argc, char *argv[])
 	localSock.sin_addr.s_addr = htonl(INADDR_ANY);
 
 	if (bind(sd, (struct sockaddr *)&localSock, sizeof(localSock))) {
-		perror("Binding datagram socket");
+		//perror("Binding datagram socket");
+		syslog(LOG_ERR, "Binding datagram socket failed: %s", strerror(errno));
 		close(sd);
+		closelog();
 		exit(1);
 	}
 
@@ -298,57 +302,71 @@ int main (int argc, char *argv[])
 	mGroup.imr_ifindex = 0;
 
 	if (setsockopt(sd, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char*)&mGroup, sizeof(mGroup)) < 0) {
-		perror("Adding multicast group");
+		//perror("Adding multicast group");
+		syslog(LOG_ERR, "Adding multicast group failed: %s", strerror(errno));
 		close(sd);
+		closelog();
 		exit(1);
 	}
 	
 	/*
 	 * First read from the socket.
 	 */
-	 printf("First read, expecting max %ld bytes\n", sizeof(emeter_data2));
+	if (!js)
+	 	printf("First read, expecting max %ld bytes\n", sizeof(emeter_data2));
+
 	 if (recvfrom(sd, &emeter_data2, sizeof(emeter_data2), 0, 0, 0) <= 0) {
-		perror("Reading first datagram message");
+		//perror("Reading first datagram message");
+		syslog(LOG_ERR, "Reading first datagram message failed: %s", strerror(errno));
+		closelog();
 		exit(1);
 	}
 
-	printf("ID:          %c%c%c\n", emeter_data2.idString[0], emeter_data2.idString[1], emeter_data2.idString[2]);
-	printf("4:           %04X\n", (uint32_t)GETW(emeter_data2._4));
-	printf("Tag:         %04X\n", (uint32_t)GETW(emeter_data2.tag));
-	printf("Group:       %08X\n", GETDW(emeter_data2.group));
-	printf("Length:      %u\n", GETW(emeter_data2.length));
-	printf("SMA net 2:   %04X\n", GETW(emeter_data2.smaNet2));
-	printf("Protocol ID: %04X\n", GETW(emeter_data2.protID));
-	printf("SN:          %05u%010u\n", GETW(emeter_data2.susy), GETDW(emeter_data2.serno));
-	printf("Time stamp:  %u\n\n", GETDW(emeter_data2.ticker) / 1000U);
+	if (!js) {
+		printf("ID:          %c%c%c\n", emeter_data2.idString[0], emeter_data2.idString[1], emeter_data2.idString[2]);
+		printf("4:           %04X\n", (uint32_t)GETW(emeter_data2._4));
+		printf("Tag:         %04X\n", (uint32_t)GETW(emeter_data2.tag));
+		printf("Group:       %08X\n", GETDW(emeter_data2.group));
+		printf("Length:      %u\n", GETW(emeter_data2.length));
+		printf("SMA net 2:   %04X\n", GETW(emeter_data2.smaNet2));
+		printf("Protocol ID: %04X\n", GETW(emeter_data2.protID));
+		printf("SN:          %05u%010u\n", GETW(emeter_data2.susy), GETDW(emeter_data2.serno));
+		printf("Ticker:      %u\n\n", GETDW(emeter_data2.ticker) / 1000U);
+	}
 
 	while (true)
 	{
 		ssize_t ret = recvfrom(sd, &emeter_data2, sizeof(emeter_data2), 0, 0, 0);
 
+		time_t now = time(0);
+
         if (ret < 0) {
-            perror("Reading datagram message");
+            //perror("Reading datagram message");
+			syslog(LOG_ERR, "Reading datagram message failed: %s", strerror(errno));
+			closelog();
             exit(1);
         }
         else if (ret == 0) {
-        	printf("No message there, continue ...\n\n");
+        	//printf("No message there, continue ...\n\n");
+			syslog(LOG_INFO, "No message there, continue ...");
         	continue;
         }
 
-		printf("Got %ld bytes from socket\n", ret);
-        
-		printf("From grid [W]: %8.0f\n", handle_emeter(&emeter_data2, CHNTYP_MEAS, 1, length));
-        printf("To grid [W]:   %8.0f\n", handle_emeter(&emeter_data2, CHNTYP_MEAS, 2, length));
+		if (!js)
+			printf("Got %ld bytes from socket\n", ret);   
 
 		if (js) {
-			printf("{\"fromGrid_W\":%.0f, \"toGrid_W\":%.0f}\n", handle_emeter(&emeter_data2, CHNTYP_MEAS, 1, length), handle_emeter(&emeter_data2, CHNTYP_MEAS, 2, length));
+			printf("{\"fromGrid_W\":%.0f, \"toGrid_W\":%.0f, \"timeStamp_s\": %ld}\n",
+			       handle_emeter(&emeter_data2, CHNTYP_MEAS, 1, length), handle_emeter(&emeter_data2, CHNTYP_MEAS, 2, length), now);
 		}
-
-		if (ts) {
-			time_t now = time(0);
-	    	printf("--%s\n", ctime(&now));
+		else {
+			printf("From grid [W]: %8.0f\n", handle_emeter(&emeter_data2, CHNTYP_MEAS, 1, length));
+			printf("To grid [W]:   %8.0f\n", handle_emeter(&emeter_data2, CHNTYP_MEAS, 2, length));
+			printf("--%s\n", ctime(&now));
 		}
     }
+
+	closelog();
 
 	exit(1);
 }
